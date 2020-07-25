@@ -1,4 +1,22 @@
+use std::io::Write;
+
 use anyhow::Context as _;
+
+use rbw::locked::{Password, Vec};
+
+async fn keychain_password(
+    url: &str,
+    email: &str,
+) -> anyhow::Result<Password> {
+    let password = keyring::Keyring::new(url, email)
+        .get_password()
+        .context("failed to get password from keyring")?;
+    let mut vec = Vec::new();
+    vec.extend(std::iter::repeat(0));
+    vec.data_mut().write(password.as_bytes())?;
+    let p = Password::new(vec);
+    Ok(p)
+}
 
 pub async fn login(
     sock: &mut crate::sock::Sock,
@@ -22,6 +40,9 @@ pub async fn login(
 
         let email = config_email().await?;
 
+        let mut keychain_password =
+            keychain_password(&url_str, &email).await.ok();
+
         let mut err_msg = None;
         for i in 1_u8..=3 {
             let err = if i > 1 {
@@ -31,14 +52,21 @@ pub async fn login(
             } else {
                 None
             };
-            let password = rbw::pinentry::getpin(
-                "Master Password",
-                &format!("Log in to {}", host),
-                err.as_deref(),
-                tty,
-            )
-            .await
-            .context("failed to read password from pinentry")?;
+
+            let password: Password =
+                if let Some(password) = keychain_password.take() {
+                    password
+                } else {
+                    let result = rbw::pinentry::getpin(
+                        "Master Password",
+                        &format!("Log in to {}", host),
+                        err.as_deref(),
+                        tty,
+                    )
+                    .await;
+                    result.context("failed to read password from pinentry")?
+                };
+
             match rbw::actions::login(&email, &password, None, None).await {
                 Ok((
                     access_token,
@@ -47,6 +75,9 @@ pub async fn login(
                     protected_key,
                     _,
                 )) => {
+                    let pw_str = String::from_utf8_lossy(password.password());
+                    keyring::Keyring::new(&url_str, &email)
+                        .set_password(&pw_str)?;
                     login_success(
                         sock,
                         state,
@@ -77,6 +108,12 @@ pub async fn login(
                             rbw::api::TwoFactorProviderType::Authenticator,
                         )
                         .await?;
+
+                        let pw_str =
+                            String::from_utf8_lossy(password.password());
+                        keyring::Keyring::new(&url_str, &email)
+                            .set_password(&pw_str)?;
+
                         login_success(
                             sock,
                             state,
@@ -107,7 +144,7 @@ pub async fn login(
                 }
                 Err(e) => {
                     return Err(e)
-                        .context("failed to log in to bitwarden instance")
+                        .context("failed to log in to bitwarden instance");
                 }
             }
         }
@@ -134,11 +171,11 @@ async fn two_factor(
             None
         };
         let code = rbw::pinentry::getpin(
-            "Authenticator App",
-            "Enter the 6 digit verification code from your authenticator app.",
-            err.as_deref(),
-            tty,
-        )
+      "Authenticator App",
+      "Enter the 6 digit verification code from your authenticator app.",
+      err.as_deref(),
+      tty,
+    )
         .await
         .context("failed to read code from pinentry")?;
         let code = std::str::from_utf8(code.password())
@@ -163,7 +200,7 @@ async fn two_factor(
                     refresh_token,
                     iterations,
                     protected_key,
-                ))
+                ));
             }
             Err(rbw::error::Error::IncorrectPassword { message }) => {
                 if i == 3 {
@@ -191,7 +228,7 @@ async fn two_factor(
             }
             Err(e) => {
                 return Err(e)
-                    .context("failed to log in to bitwarden instance")
+                    .context("failed to log in to bitwarden instance");
             }
         }
     }
@@ -282,6 +319,10 @@ pub async fn unlock(
             };
 
         let email = config_email().await?;
+        let url_str = config_base_url().await?;
+
+        let mut keychain_password =
+            keychain_password(&url_str, &email).await.ok();
 
         let mut err_msg = None;
         for i in 1u8..=3 {
@@ -292,14 +333,24 @@ pub async fn unlock(
             } else {
                 None
             };
-            let password = rbw::pinentry::getpin(
-                "Master Password",
-                "Unlock the local database",
-                err.as_deref(),
-                tty,
-            )
-            .await
-            .context("failed to read password from pinentry")?;
+
+            let password: Password =
+                if let Some(password) = keychain_password.take() {
+                    password
+                } else {
+                    let result = rbw::pinentry::getpin(
+                        "Master Password",
+                        "Unlock the local database",
+                        err.as_deref(),
+                        tty,
+                    )
+                    .await;
+                    result.context("failed to read password from pinentry")?
+                };
+
+            let pw_str = String::from_utf8_lossy(password.password());
+            keyring::Keyring::new(&url_str, &email).set_password(&pw_str)?;
+
             match rbw::actions::unlock(
                 &email,
                 &password,

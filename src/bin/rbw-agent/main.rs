@@ -17,6 +17,7 @@ async fn tokio_main(
     }
 
     let mut agent = crate::agent::Agent::new()?;
+    println!("Starting..");
     agent.run(listener).await?;
 
     Ok(())
